@@ -5,7 +5,6 @@ RUN apt-get update \
     curl \
     wget \
     tar \
-    xz-utils \
   && apt-get clean \
   && rm -rf /var/lib/{dpkg,apt,cache,log}
 
