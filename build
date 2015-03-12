@@ -29,8 +29,7 @@ build() {
 
 		docker rm "$build" 2>/dev/null || true
 
-		docker run --name "$build" "$BUILD_IMAGE" $build_options
-		docker cp "$build":/rootfs.tar.gz "./$version_dir/"
+		docker run --rm "$BUILD_IMAGE" $build_options > "./$version_dir/rootfs.tar.gz"
 
 		if [[ "$BUILD_MASTER" ]]; then
 			docker build -t "$master" "./$version_dir/"
@@ -47,8 +46,6 @@ build() {
 			done
 			docker rmi "$master" || true
 		fi
-
-		docker rm "$build" || true
 	done
 }
 

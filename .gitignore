@@ -1,2 +1,3 @@
 /images
-/**/rootfs.tar.gz
+/versions/**/rootfs.tar.gz
+/versions/**/Dockerfile

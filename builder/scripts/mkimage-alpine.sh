@@ -1,110 +1,96 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
 # This mkimage-alpine.sh is a modified version from
 # https://github.com/docker/docker/blob/master/contrib/mkimage-alpine.sh.
 # Changes were inspired by work done by Eivind Uggedal (uggedal) and
 # Luis Lavena (luislavena).
 
-set -e
-[ "$TRACE" ] && set -x
+readonly ARCH="$(uname -m)"
+declare REL="${REL:-edge}"
+declare MIRROR="${MIRROR:-http://nl.alpinelinux.org/alpine}"
+declare TIMEZONE="${TIMEZONE:-UTC}"
 
-[ "$(id -u)" -eq 0 ] || {
-	printf >&2 '%s requires root\n' "$0"
-	exit 1
+set -eo pipefail; [[ "$TRACE" ]] && set -x
+
+[[ "$(id -u)" -eq 0 ]] || {
+	printf >&2 '%s requires root\n' "$0" && exit 1
 }
 
 usage() {
-	printf >&2 '%s: [-r release] [-m mirror] [-s] [-e] [-c] [-t]\n' "$0"
-	exit 1
+	printf >&2 '%s: [-r release] [-m mirror] [-s] [-e] [-c] [-t]\n' "$0" && exit 1
 }
 
-tmp() {
-	TMP="$(mktemp -d "${TMPDIR:-/var/tmp}/alpine-docker-XXXXXXXXXX")"
-	ROOTFS="$(mktemp -d "${TMPDIR:-/var/tmp}/alpine-docker-rootfs-XXXXXXXXXX")"
-	trap 'rm -rf $TMP $ROOTFS' EXIT TERM INT
+output_redirect() {
+	if [[ "$SAVE" -eq 1 ]]; then
+		cat - 1>&2
+	else
+		cat -
+	fi
 }
 
-apkv() {
-	curl -sSL "${REPO}/${ARCH}/APKINDEX.tar.gz" | tar -Oxz |
-		grep '^P:apk-tools-static$' -a -A1 | tail -n1 | cut -d: -f2
+get-apk-version() {
+	declare release="${1}" mirror="${2:-$MIRROR}" arch="${3:-$ARCH}"
+	curl -sSL "${mirror}/${release}/main/${arch}/APKINDEX.tar.gz" \
+		| tar -Oxz \
+		| grep '^P:apk-tools-static$' -a -A1 \
+		| tail -n1 \
+		| cut -d: -f2
 }
 
-getapk() {
-	local version="$(apkv)"
-	curl -sSL "${REPO}/${ARCH}/apk-tools-static-${version}.apk" |
-		tar -xz -C "$TMP" sbin/apk.static
-}
+build(){
+	declare mirror="$1" rel="$2" timezone="${3:-UTC}"
+	local repo="$mirror/$rel/main"
 
-mkbase() {
-	"${TMP}/sbin/apk.static" --repository "$REPO" --update-cache --allow-untrusted \
-		--root "$ROOTFS" --initdb add alpine-base
-}
+	# tmp
+	local tmp="$(mktemp -d "${TMPDIR:-/var/tmp}/alpine-docker-XXXXXXXXXX")"
+	local rootfs="$(mktemp -d "${TMPDIR:-/var/tmp}/alpine-docker-rootfs-XXXXXXXXXX")"
+	trap 'rm -rf $tmp $rootfs' EXIT TERM INT
 
-timezone() {
-	local timezone="${1:-UTC}"
+	# get apk
+	curl -sSL "${repo}/${ARCH}/apk-tools-static-$(get-apk-version "$rel").apk" \
+		| tar -xz -C "$tmp" sbin/apk.static
 
-	"${TMP}/sbin/apk.static" \
-		--repository "$REPO" \
+	# mkbase
+	"${tmp}/sbin/apk.static" \
+		--repository "$repo" \
+		--root "$rootfs" \
 		--update-cache \
 		--allow-untrusted \
-		--root "$ROOTFS" \
-		--initdb add tzdata
-	cp -a "${ROOTFS}/usr/share/zoneinfo/${timezone}" "${ROOTFS}/etc/localtime"
-	"${TMP}/sbin/apk.static" \
-		--root "$ROOTFS" \
-		del tzdata
-}
+		--initdb \
+			add alpine-base tzdata
+	cp -a "${rootfs}/usr/share/zoneinfo/${timezone}" "${rootfs}/etc/localtime"
+	"${tmp}/sbin/apk.static" \
+		--root "$rootfs" \
+			del tzdata
+	rm -f "${rootfs}"/var/cache/apk/*
 
-conf() {
-	printf '%s\n' "$REPO" > "${ROOTFS}/etc/apk/repositories"
-	[ "$REPO_EXTRA" -eq 1 ] && {
-		[ "$REL" = "edge" ] || printf '%s\n' "@edge $MIRROR/edge/main" >> "${ROOTFS}/etc/apk/repositories"
-		printf '%s\n' "@testing $MIRROR/edge/testing" >> "${ROOTFS}/etc/apk/repositories"
+	# conf
+	printf '%s\n' "$repo" > "${rootfs}/etc/apk/repositories"
+	[[ "$REPO_EXTRA" ]] && {
+		[[ "$rel" == "edge" ]] || printf '%s\n' "@edge $MIRROR/edge/main" >> "${rootfs}/etc/apk/repositories"
+		printf '%s\n' "@testing $MIRROR/edge/testing" >> "${rootfs}/etc/apk/repositories"
 	}
-	[ "$ADD_APK_SCRIPT" -eq 1 ] && cp /apk-install "${ROOTFS}/usr/sbin/apk-install"
-	timezone "UTC"
-	rm -f "$ROOTFS"/var/cache/apk/*
+
+	[[ "$ADD_APK_SCRIPT" ]] && cp /apk-install "${rootfs}/usr/sbin/apk-install"
+
+	# save
+	[[ "$SAVE" ]] && tar -z -f rootfs.tar.gz --numeric-owner -C "$rootfs" -c .
 }
 
-save() {
-	[ "$SAVE" -eq 1 ] || return
+main() {
+	while getopts "hr:m:t:sec" opt; do
+		case $opt in
+			r) REL="$OPTARG";;
+			m) MIRROR="$OPTARG";;
+			s) SAVE=1;;
+			e) REPO_EXTRA=1;;
+			t) TIMEZONE="$OPTARG";;
+			c) ADD_APK_SCRIPT=1;;
+			*) usage;;
+		esac
+	done
 
-	tar -z -f rootfs.tar.gz --numeric-owner -C "$ROOTFS" -c .
+	build "$MIRROR" "$REL"
 }
 
-while getopts "hr:m:t:sec" opt; do
-	case $opt in
-		r)
-			REL="$OPTARG"
-			;;
-		m)
-			MIRROR="$OPTARG"
-			;;
-		s)
-			SAVE=1
-			;;
-		e)
-			REPO_EXTRA=1
-			;;
-		t)
-			TIMEZONE="$OPTARG"
-			;;
-		c)
-			ADD_APK_SCRIPT=1
-			;;
-		*)
-			usage
-			;;
-	esac
-done
-
-REL="${REL:-edge}"
-MIRROR="${MIRROR:-http://nl.alpinelinux.org/alpine}"
-SAVE="${SAVE:-0}"
-ADD_APK_SCRIPT="${ADD_APK_SCRIPT:-0}"
-TIMEZONE="${TIMEZONE:-UTC}"
-REPO="$MIRROR/$REL/main"
-REPO_EXTRA="${REPO_EXTRA:-0}"
-ARCH="$(uname -m)"
-
-tmp 1>&2 && getapk 1>&2 && mkbase 1>&2 && conf 1>&2 && save
+main "$@"
